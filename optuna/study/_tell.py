@@ -164,6 +164,20 @@ def _tell_with_warning(
         # values have been checked to be castable to floats in _check_values_are_feasible.
         values = [float(value) for value in values]
 
+    # Record the terminal transition in the trajectory *before* flipping the persisted
+    # state, so the event log always contains the final state even if the state write is
+    # about to fail. The recorder is only present when the feature is enabled and only
+    # reachable through a live Trial object (the int-based tell API has no in-process
+    # recorder; such trials simply keep their previously persisted events).
+    recorder = (
+        getattr(trial, "_trajectory_recorder", None) if isinstance(trial, optuna.Trial) else None
+    )
+    if recorder is not None:
+        if state == TrialState.FAIL:
+            reason = values_conversion_failure_message or "trial failed"
+            recorder.record_failure(type(reason).__name__, str(reason))
+        recorder.finalize(state)
+
     # Post-processing and storing the trial.
     try:
         # Sampler defined trial post-processing.

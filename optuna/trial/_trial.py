@@ -21,6 +21,7 @@ from optuna.distributions import IntDistribution
 from optuna.study._constrained_optimization import _CONSTRAINTS_KEY
 from optuna.study._constrained_optimization import _get_constraints_from_system_attrs
 from optuna.trial._base import BaseTrial
+from optuna.trial._trajectory import TrajectoryRecorder
 
 
 if TYPE_CHECKING:
@@ -69,6 +70,23 @@ class Trial(BaseTrial):
         self.relative_search_space: dict[str, BaseDistribution] | None = None
         self._relative_params: dict[str, Any] | None = None
         self._fixed_params = self._cached_frozen_trial.system_attrs.get("fixed_params", {})
+
+        # Trajectory recorder, created lazily on the first report()/should_prune() call.
+        # Staying ``None`` until then means a trial that never reports an intermediate
+        # value incurs no extra storage write and behaves exactly like the legacy path.
+        self._trajectory_recorder: TrajectoryRecorder | None = None
+
+    def _get_trajectory_recorder(self) -> TrajectoryRecorder | None:
+        """Return the lazily-created recorder, or ``None`` when the feature is off."""
+        if not self.study._trajectory_enabled:
+            return None
+        if self._trajectory_recorder is None:
+            self._trajectory_recorder = TrajectoryRecorder(
+                storage=self.storage,
+                trial_id=self._trial_id,
+                trial_number=self._cached_frozen_trial.number,
+            )
+        return self._trajectory_recorder
 
     @property
     def relative_params(self) -> dict[str, Any]:
@@ -500,8 +518,18 @@ class Trial(BaseTrial):
         if step < 0:
             raise ValueError(f"`{step=}` must be non-negative.")
 
-        if step in self._cached_frozen_trial.intermediate_values:
-            # Do nothing if already reported.
+        recorder = self._get_trajectory_recorder()
+        if recorder is not None:
+            # Trajectory mode: strict, deterministic semantics.
+            # - rejects reports after the pruning decision (closes the prune window)
+            # - rejects reports on a finished trial with an explicit state in the message
+            # - rejects a duplicated step instead of silently ignoring it
+            # The recorder raises before any storage write, so no value can land once the
+            # trial has been pruned/finished.
+            self._trajectory_recorder = recorder
+            recorder.record_step(step, value)
+        elif step in self._cached_frozen_trial.intermediate_values:
+            # Historical behavior (feature off): warn and silently ignore.
             optuna_warn(
                 f"The reported value is ignored because this `{step=}` is already reported."
             )
@@ -540,7 +568,19 @@ class Trial(BaseTrial):
             )
 
         trial = self._get_latest_trial()
-        return self.study.pruner.prune(self.study, trial)
+        should_prune = self.study.pruner.prune(self.study, trial)
+        if should_prune:
+            # Lazily create the recorder here (a trial may call should_prune without a
+            # preceding report), record the pruning decision the instant it is made and
+            # latch the trial so any later report() is rejected -- even though the PRUNED
+            # state is only persisted later, when the objective raises TrialPruned and
+            # tell() runs. A non-pruning should_prune() creates nothing, so a trial that
+            # never reports still performs no extra storage write.
+            recorder = self._get_trajectory_recorder()
+            if recorder is not None:
+                self._trajectory_recorder = recorder
+                recorder.record_prune_decision(trial.last_step)
+        return should_prune
 
     def set_user_attr(self, key: str, value: Any) -> None:
         """Set user attributes to the trial.

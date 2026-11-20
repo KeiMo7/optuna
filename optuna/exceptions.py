@@ -90,6 +90,29 @@ class UpdateFinishedTrialError(OptunaError, RuntimeError):
     pass
 
 
+class DuplicatedStepError(OptunaError):
+    """Exception for reporting an intermediate value at an already reported step.
+
+    This error is only raised when trial trajectories are enabled on the study
+    (see :func:`optuna.study.create_study` with ``enable_trajectory=True``). When
+    trajectories are disabled, :func:`optuna.trial.Trial.report` keeps its historical
+    behavior and silently ignores a value reported at a duplicated step.
+    """
+
+    pass
+
+
+class TrajectoryCorruptedError(OptunaError):
+    """Exception for a malformed persisted trial trajectory.
+
+    The error message identifies the offending trial number and, when available, the
+    step of the first invalid record. It is raised by the trajectory validation helpers
+    in :mod:`optuna.trial._trajectory`.
+    """
+
+    pass
+
+
 class ExperimentalWarning(Warning):
     """Experimental Warning class.
 

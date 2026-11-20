@@ -16,3 +16,6 @@ A :class:`~optuna.trial.Trial` instance represents a process of evaluating an ob
    FrozenTrial
    TrialState
    create_trial
+
+.. automodule:: optuna.trial._trajectory
+   :members: TrialTrajectory

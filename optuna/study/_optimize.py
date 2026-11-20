@@ -216,6 +216,12 @@ def _run_trial(
             state = TrialState.FAIL
             func_err = e
             func_err_fail_exc_info = sys.exc_info()
+            # Persist the concrete failure reason into the trajectory while the exception
+            # object is still in hand. _tell_with_warning later appends the terminal FAIL
+            # state event; recorder.finalize is idempotent so the state is not duplicated.
+            recorder = getattr(trial, "_trajectory_recorder", None)
+            if recorder is not None:
+                recorder.record_failure(type(e).__name__, str(e) or repr(e))
 
     # `_tell_with_warning` may raise during trial post-processing.
     try:

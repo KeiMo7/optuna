@@ -39,6 +39,12 @@ from optuna.study._tell import _get_frozen_trial
 from optuna.study._tell import _tell_with_warning
 from optuna.trial import create_trial
 from optuna.trial import TrialState
+from optuna.trial._trajectory import group_repeats_by_params
+from optuna.trial._trajectory import has_trajectory
+from optuna.trial._trajectory import load_trajectory
+from optuna.trial._trajectory import trials_matching_params
+from optuna.trial._trajectory import TrialTrajectory
+from optuna.trial._trajectory import validate_study_trajectories
 
 
 _dataframe = _LazyImport("optuna.study._dataframe")
@@ -54,6 +60,7 @@ ObjectiveFuncType = Callable[["Trial"], Union[float, Sequence[float]]]
 
 
 _SYSTEM_ATTR_METRIC_NAMES = "study:metric_names"
+_STUDY_ENABLED_SYSTEM_ATTR_KEY = "optuna:trajectory:enabled"
 
 
 _logger = logging.get_logger(__name__)
@@ -95,6 +102,12 @@ class Study:
 
         self._thread_local = _ThreadLocalStudyAttribute()
         self._stop_flag = False
+
+        # Cached value of the study-level trajectory switch. ``None`` means "not read
+        # from storage yet". The switch is persisted as a study system attribute, so it
+        # survives reload and applies uniformly to every worker/process sharing the
+        # storage, without changing any existing Study constructor argument.
+        self._trajectory_enabled_cache: bool | None = None
 
     def __getstate__(self) -> dict[Any, Any]:
         state = self.__dict__.copy()
@@ -233,6 +246,32 @@ class Study:
         return self._directions
 
     @property
+    def trajectory_enabled(self) -> bool:
+        """Whether ordered trial trajectories are recorded for this study.
+
+        When :obj:`True`, every trial records an append-only trajectory (each reported
+        step, the pruning decision moment and the terminal state/failure reason), and
+        :func:`~optuna.trial.Trial.report` enforces strict semantics: duplicate steps and
+        reports after pruning/finish raise instead of being silently ignored. The switch is
+        stored persistently and is therefore shared by all processes attached to the same
+        storage. When :obj:`False` (the default) behavior is identical to older Optuna.
+        """
+        return self._trajectory_enabled
+
+    @property
+    def _trajectory_enabled(self) -> bool:
+        if self._trajectory_enabled_cache is None:
+            attrs = self._storage.get_study_system_attrs(self._study_id)
+            self._trajectory_enabled_cache = bool(attrs.get(_STUDY_ENABLED_SYSTEM_ATTR_KEY, False))
+        return self._trajectory_enabled_cache
+
+    def _set_trajectory_enabled(self, enabled: bool) -> None:
+        self._storage.set_study_system_attr(
+            self._study_id, _STUDY_ENABLED_SYSTEM_ATTR_KEY, bool(enabled)
+        )
+        self._trajectory_enabled_cache = bool(enabled)
+
+    @property
     def trials(self) -> list[FrozenTrial]:
         """Return all trials in the study.
 
@@ -311,6 +350,95 @@ class Study:
             return copy.deepcopy(filtered_trials) if deepcopy else filtered_trials
 
         return self._storage.get_all_trials(self._study_id, deepcopy=deepcopy, states=states)
+
+    # ------------------------------------------------------------------
+    # Trajectory API (opt-in; only populated when ``trajectory_enabled``)
+    # ------------------------------------------------------------------
+    def get_trial_trajectory(self, trial: Trial | int) -> TrialTrajectory:
+        """Return the ordered trajectory of a single trial.
+
+        This reads only the one requested trial from storage (on-demand access; it does
+        not load the whole study) and reconstructs its event log.
+
+        Args:
+            trial:
+                A :class:`~optuna.trial.Trial` object or a trial number.
+
+        Returns:
+            A :class:`~optuna.trial._trajectory.TrialTrajectory` view.
+
+        Raises:
+            KeyError:
+                If the trial has no trajectory (the feature was off, or the trial predates
+                it).
+            optuna.exceptions.TrajectoryCorruptedError:
+                If the persisted trajectory is malformed.
+        """
+        frozen_trial = _get_frozen_trial(self, trial)
+        return load_trajectory(frozen_trial)
+
+    def get_all_trajectories(
+        self, states: Container[TrialState] | None = None
+    ) -> list[TrialTrajectory]:
+        """Return trajectories for every trial that has one, ordered by trial number.
+
+        Only trials carrying a trajectory are returned, so studies created before the
+        feature (or run with it disabled) are skipped rather than reported as missing.
+        """
+        frozen_trials = self._get_trials(deepcopy=False, states=states, use_cache=True)
+        return [load_trajectory(t) for t in frozen_trials if has_trajectory(t)]
+
+    def get_trials_with_params(self, params: dict[str, Any]) -> list[FrozenTrial]:
+        """Return historical trials whose suggested parameters exactly match ``params``.
+
+        Use this to inspect the performance distribution of one parameter combination,
+        including every repeat run of that combination. Matching is on-demand and reads
+        the cached trial list rather than any new full storage scan.
+        """
+        frozen_trials = self._get_trials(deepcopy=False, states=None, use_cache=True)
+        return trials_matching_params(frozen_trials, params)
+
+    def get_repeat_groups(self) -> dict[tuple[tuple[str, Any], ...], list[FrozenTrial]]:
+        """Group trials by identical parameter combination (repeat runs).
+
+        Each group maps a sorted ``(parameter name, value)`` signature to the list of
+        independent trials that share it. Repeats stay separate trials and are counted
+        individually.
+        """
+        frozen_trials = self._get_trials(deepcopy=False, states=None, use_cache=True)
+        return group_repeats_by_params(frozen_trials)
+
+    def validate_trajectories(self) -> dict[int, str]:
+        """Validate every persisted trajectory and return ``trial_number -> error``.
+
+        An empty dict means all present trajectories are structurally valid. The message
+        for each corrupt trajectory identifies the trial and, where relevant, the step.
+        """
+        frozen_trials = self._get_trials(deepcopy=False, states=None, use_cache=True)
+        return validate_study_trajectories(frozen_trials)
+
+    def export_trajectories(
+        self, path: str, states: Container[TrialState] | None = None
+    ) -> dict[str, Any]:
+        """Export all trajectories to a JSON file and return the exported payload.
+
+        The output is a self-contained JSON object with study metadata and one record per
+        trial, each containing the full ordered event log, the prune step, final state and
+        failure reason. This is the supported way to archive/share a trajectory snapshot.
+        """
+        import json
+
+        trajectories = self.get_all_trajectories(states=states)
+        payload = {
+            "study_name": self.study_name,
+            "directions": [d.name for d in self.directions],
+            "trajectory_enabled": self._trajectory_enabled,
+            "n_trajectories": len(trajectories),
+            "trajectories": [t.to_dict() for t in trajectories],
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, sort_keys=True)
+        return payload
 
     def _get_best_trial(self, deepcopy: bool) -> FrozenTrial:
         """Return the best trial in the study.
@@ -1169,6 +1297,7 @@ def create_study(
     direction: Literal["minimize", "maximize"] | StudyDirection | None = None,
     load_if_exists: bool = False,
     directions: Sequence[Literal["minimize", "maximize"] | StudyDirection] | None = None,
+    enable_trajectory: bool = False,
 ) -> Study:
     """Create a new :class:`~optuna.study.Study`.
 
@@ -1233,6 +1362,16 @@ def create_study(
         directions:
             A sequence of directions during multi-objective optimization.
             ``direction`` and ``directions`` must not be specified at the same time.
+        enable_trajectory:
+            Opt-in switch for ordered trial trajectories. When :obj:`True`, each trial
+            records every reported intermediate value, the moment the pruner decides to
+            prune it and its terminal state (including a failure reason), and these are
+            queryable via :func:`~optuna.study.Study.get_trial_trajectory` /
+            :func:`~optuna.study.Study.export_trajectories`. It also makes
+            :func:`~optuna.trial.Trial.report` strict: a duplicated step or a report after
+            the pruning decision/finish raises instead of being silently ignored. The
+            default :obj:`False` preserves the historical behavior exactly. The switch is
+            persisted on the study and shared by all processes using the same storage.
 
     Returns:
         A :class:`~optuna.study.Study` object.
@@ -1298,6 +1437,9 @@ def create_study(
     study_name = storage.get_study_name_from_id(study_id)
     study = Study(study_name=study_name, storage=storage, sampler=sampler, pruner=pruner)
 
+    if enable_trajectory:
+        study._set_trajectory_enabled(True)
+
     return study
 
 
@@ -1355,6 +1497,11 @@ def load_study(
             A pruner object that decides early stopping of unpromising trials.
             If :obj:`None` is specified, :class:`~optuna.pruners.MedianPruner` is used
             as the default. See also :class:`~optuna.pruners`.
+
+    Note:
+        The trajectory switch (``enable_trajectory``) is stored persistently on the
+        study, so a loaded study keeps whatever setting it was created with. There is no
+        need to pass it again; inspect it via :attr:`~optuna.study.Study.trajectory_enabled`.
 
     Returns:
         A :class:`~optuna.study.Study` object.

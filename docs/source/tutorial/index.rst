@@ -45,6 +45,7 @@ Showcases the recipes that might help you using Optuna with comfort.
 - :doc:`20_recipes/012_artifact_tutorial`
 - :doc:`20_recipes/013_wilcoxon_pruner`
 - :doc:`20_recipes/014_ablation_study_by_optuna`
+- :doc:`20_recipes/015_trial_trajectory`
 
 .. only:: html
 

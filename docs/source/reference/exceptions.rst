@@ -15,3 +15,5 @@ The :mod:`~optuna.exceptions` module defines Optuna-specific exceptions deriving
    StorageInternalError
    DuplicatedStudyError
    UpdateFinishedTrialError
+   DuplicatedStepError
+   TrajectoryCorruptedError
