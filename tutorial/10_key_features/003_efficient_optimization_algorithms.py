@@ -190,3 +190,89 @@ study.optimize(objective, n_trials=20)
 #
 #         pruning_callback = optuna.integration.LightGBMPruningCallback(trial, 'validation-error')
 #         gbm = lgb.train(param, dtrain, valid_sets=[dvalid], callbacks=[pruning_callback])
+
+###################################################################################################
+# Recording Pruning Decisions
+# ----------------------------
+# By default Optuna only stores each trial's final state, so *why* a trial was pruned — at which
+# step, against which threshold, and compared to which historical trials — is not retained.
+# :class:`~optuna.pruners.PruningRecorder` fills that gap. It is opt-in and does not change when
+# pruning happens or which trials are pruned; when it is not attached, pruning behaves exactly as
+# before.
+#
+# Attach it through :func:`~optuna.study.create_study` with the ``pruning_recorder`` argument:
+
+recorder = optuna.pruners.PruningRecorder()
+study = optuna.create_study(
+    direction="minimize",
+    pruner=optuna.pruners.MedianPruner(n_startup_trials=3, n_warmup_steps=1),
+    pruning_recorder=recorder,
+)
+
+
+def recorded_objective(trial):
+    x = trial.suggest_float("x", -10.0, 10.0)
+    for step in range(6):
+        trial.report((x - 2.0) ** 2 + 0.1 * step, step)
+        if trial.should_prune():
+            raise optuna.TrialPruned()
+    return (x - 2.0) ** 2
+
+
+study.optimize(recorded_objective, n_trials=20)
+
+###################################################################################################
+# Every :meth:`~optuna.trial.Trial.should_prune` call now leaves a
+# :class:`~optuna.pruners.PruningDecisionRecord`. The records for pruned trials name the decision
+# step, the intermediate value, the rule and threshold applied, and the historical trials that
+# participated in the comparison — referenced by their stable trial ``number``, never a list
+# position.
+
+if recorder.pruned_records():
+    record = recorder.pruned_records()[0]
+    print("pruned trial", record.trial_number, "at step", record.step)
+    print("basis:", record.decision_basis)
+    print("compared against trial numbers:", [r.number for r in record.referenced_trials])
+
+###################################################################################################
+# For each pruned trial the recorder also gives a counterfactual estimate of the final value had
+# the trial been allowed to continue. The estimate is always labeled as such, together with its
+# method and confidence level. When too few completed trials are available, no number is returned
+# at all — an explicit reason is given instead, so unsupported guesses never appear as data.
+
+if recorder.pruned_records():
+    estimate = recorder.pruned_records()[0].estimate
+    print("estimate method:", estimate.method)
+    print("confidence level:", estimate.confidence_level)
+    if estimate.is_estimate:
+        print("prediction interval:", (round(estimate.lower, 3), round(estimate.upper, 3)))
+    else:
+        print("no interval:", estimate.insufficient_reason)
+
+###################################################################################################
+# Aggregate statistics are maintained incrementally, so they stay cheap even for very large
+# studies. :meth:`~optuna.pruners.PruningRecorder.summary` groups decisions by pruner, returns the
+# pruning-rate curve over search progress, and flags intervals where one pruner prunes an
+# unusually long run of trials (a typical symptom of a misconfigured threshold).
+
+summary = recorder.summary()
+print("decisions by pruner:", summary["by_pruner"])
+print("anomaly flags:", summary["anomalies"])
+
+###################################################################################################
+# To persist records beyond the process lifetime — records otherwise live in memory — pass a
+# ``sink`` callable. A failing sink only emits a warning; it never stops the search.
+#
+# .. code-block:: python
+#
+#     def jsonl_sink(record):
+#         with open("pruning_decisions.jsonl", "a") as f:
+#             f.write(json.dumps(record.to_dict()) + "\n")
+#
+#     recorder = optuna.pruners.PruningRecorder(sink=jsonl_sink)
+#
+# Known limitations: the recorder captures only decisions made after it is attached; pruning
+# decisions from pre-existing stored trials cannot be reconstructed because no evidence was
+# persisted. Counterfactual intervals assume an approximately linear intermediate-to-final
+# relationship within each step and, like the pruning feature itself, single-objective studies
+# only.

@@ -540,7 +540,15 @@ class Trial(BaseTrial):
             )
 
         trial = self._get_latest_trial()
-        return self.study.pruner.prune(self.study, trial)
+        pruned = self.study.pruner.prune(self.study, trial)
+        recorder = getattr(self.study, "_pruning_recorder", None)
+        if recorder is not None:
+            try:
+                recorder.record_decision(self.study, trial, self.study.pruner, pruned)
+            except Exception as e:
+                # Recording must never change the timing or outcome of pruning.
+                _logger.warning("Pruning decision recording failed and was skipped: %s", e)
+        return pruned
 
     def set_user_attr(self, key: str, value: Any) -> None:
         """Set user attributes to the trial.

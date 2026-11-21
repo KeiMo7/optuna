@@ -6,6 +6,10 @@ from optuna.pruners._median import MedianPruner
 from optuna.pruners._nop import NopPruner
 from optuna.pruners._patient import PatientPruner
 from optuna.pruners._percentile import PercentilePruner
+from optuna.pruners._recording import EstimateInterval
+from optuna.pruners._recording import PruningDecisionRecord
+from optuna.pruners._recording import PruningRecorder
+from optuna.pruners._recording import TrialRef
 from optuna.pruners._successive_halving import SuccessiveHalvingPruner
 from optuna.pruners._threshold import ThresholdPruner
 from optuna.pruners._wilcoxon import WilcoxonPruner
@@ -18,13 +22,17 @@ if TYPE_CHECKING:
 
 __all__ = [
     "BasePruner",
+    "EstimateInterval",
     "HyperbandPruner",
     "MedianPruner",
     "NopPruner",
     "PatientPruner",
     "PercentilePruner",
+    "PruningDecisionRecord",
+    "PruningRecorder",
     "SuccessiveHalvingPruner",
     "ThresholdPruner",
+    "TrialRef",
     "WilcoxonPruner",
 ]
 

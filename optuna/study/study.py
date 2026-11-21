@@ -82,6 +82,7 @@ class Study:
         storage: str | storages.BaseStorage,
         sampler: "samplers.BaseSampler" | None = None,
         pruner: pruners.BasePruner | None = None,
+        pruning_recorder: "pruners.PruningRecorder | None" = None,
     ) -> None:
         self.study_name = study_name
         storage = storages.get_storage(storage)
@@ -92,6 +93,11 @@ class Study:
 
         self.sampler = sampler or samplers.TPESampler()
         self.pruner = pruner or pruners.MedianPruner()
+
+        # Opt-in pruning decision recorder. ``None`` preserves the legacy behavior exactly.
+        self._pruning_recorder: pruners.PruningRecorder | None = None
+        if pruning_recorder is not None:
+            pruning_recorder.attach(self)
 
         self._thread_local = _ThreadLocalStudyAttribute()
         self._stop_flag = False
@@ -104,6 +110,16 @@ class Study:
     def __setstate__(self, state: dict[Any, Any]) -> None:
         self.__dict__.update(state)
         self._thread_local = _ThreadLocalStudyAttribute()
+
+    @property
+    def pruning_recorder(self) -> "pruners.PruningRecorder | None":
+        """Return the attached :class:`~optuna.pruners.PruningRecorder`, or :obj:`None`.
+
+        The recorder is opt-in; :obj:`None` means pruning decisions are not recorded and
+        :meth:`~optuna.trial.Trial.should_prune` follows the legacy behavior exactly.
+        """
+
+        return self._pruning_recorder
 
     @property
     def best_params(self) -> dict[str, Any]:
@@ -500,6 +516,17 @@ class Study:
             RuntimeError:
                 If nested invocation of this method occurs.
         """
+        # Feed completed trials to an attached pruning recorder so its statistics stay
+        # incremental. User callbacks are kept separate and unchanged.
+        if self._pruning_recorder is not None:
+            recorder_callbacks: Iterable[Callable[[Study, FrozenTrial], None]] = (
+                self._pruning_recorder.on_trial_complete,
+            )
+            callbacks = (
+                list(callbacks) + list(recorder_callbacks)
+                if callbacks is not None
+                else recorder_callbacks
+            )
         _optimize(
             study=self,
             func=func,
@@ -1169,6 +1196,7 @@ def create_study(
     direction: Literal["minimize", "maximize"] | StudyDirection | None = None,
     load_if_exists: bool = False,
     directions: Sequence[Literal["minimize", "maximize"] | StudyDirection] | None = None,
+    pruning_recorder: "pruners.PruningRecorder | None" = None,
 ) -> Study:
     """Create a new :class:`~optuna.study.Study`.
 
@@ -1233,6 +1261,11 @@ def create_study(
         directions:
             A sequence of directions during multi-objective optimization.
             ``direction`` and ``directions`` must not be specified at the same time.
+        pruning_recorder:
+            Optional :class:`~optuna.pruners.PruningRecorder` that records every pruning
+            decision (step, intermediate value, referenced historical trials, rule and a
+            counterfactual estimate for pruned trials) and maintains incremental pruning
+            statistics. When :obj:`None`, pruning behaves exactly as without this feature.
 
     Returns:
         A :class:`~optuna.study.Study` object.
@@ -1296,7 +1329,13 @@ def create_study(
             )
 
     study_name = storage.get_study_name_from_id(study_id)
-    study = Study(study_name=study_name, storage=storage, sampler=sampler, pruner=pruner)
+    study = Study(
+        study_name=study_name,
+        storage=storage,
+        sampler=sampler,
+        pruner=pruner,
+        pruning_recorder=pruning_recorder,
+    )
 
     return study
 
@@ -1307,6 +1346,7 @@ def load_study(
     storage: str | storages.BaseStorage,
     sampler: "samplers.BaseSampler" | None = None,
     pruner: pruners.BasePruner | None = None,
+    pruning_recorder: "pruners.PruningRecorder | None" = None,
 ) -> Study:
     """Load the existing :class:`~optuna.study.Study` that has the specified name.
 
@@ -1355,6 +1395,10 @@ def load_study(
             A pruner object that decides early stopping of unpromising trials.
             If :obj:`None` is specified, :class:`~optuna.pruners.MedianPruner` is used
             as the default. See also :class:`~optuna.pruners`.
+        pruning_recorder:
+            Optional :class:`~optuna.pruners.PruningRecorder`. Attaching it only records
+            decisions made after loading; pruning decisions from the pre-existing stored
+            trials cannot be reconstructed because no decision evidence was persisted.
 
     Returns:
         A :class:`~optuna.study.Study` object.
@@ -1376,7 +1420,13 @@ def load_study(
             "study found in the storage."
         )
 
-    study = Study(study_name=study_name, storage=storage, sampler=sampler, pruner=pruner)
+    study = Study(
+        study_name=study_name,
+        storage=storage,
+        sampler=sampler,
+        pruner=pruner,
+        pruning_recorder=pruning_recorder,
+    )
     return study
 
 
