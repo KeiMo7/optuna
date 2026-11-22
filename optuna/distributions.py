@@ -625,9 +625,18 @@ def check_distribution_compatibility(
 ) -> None:
     """A function to check compatibility of two distributions.
 
-    It checks whether ``dist_old`` and ``dist_new`` are the same kind of distributions.
-    If ``dist_old`` is :class:`~optuna.distributions.CategoricalDistribution`,
-    it further checks ``choices`` are the same between ``dist_old`` and ``dist_new``.
+    It checks whether ``dist_old`` and ``dist_new`` are the same kind of
+    distributions. The single lossless cross-kind change, an
+    :class:`~optuna.distributions.IntDistribution` widened to a
+    :class:`~optuna.distributions.FloatDistribution` with the same ``log``
+    configuration, is also accepted because every historical integer value is a
+    valid float. Any other kind mismatch, including
+    :class:`~optuna.distributions.FloatDistribution` to
+    :class:`~optuna.distributions.IntDistribution`, is rejected.
+    Two :class:`~optuna.distributions.CategoricalDistribution` instances with
+    different ``choices`` are accepted as an evolving value space: historical
+    values that reference a dropped choice remain in storage and are flagged
+    out of range by the evolving-space machinery rather than raising here.
     Note that this method is not supposed to be called by library users.
 
     Args:
@@ -639,6 +648,14 @@ def check_distribution_compatibility(
     """
 
     if dist_old.__class__ != dist_new.__class__:
+        if (
+            isinstance(dist_old, IntDistribution)
+            and isinstance(dist_new, FloatDistribution)
+            and dist_old.log == dist_new.log
+        ):
+            # Widening integers to floats is lossless: every recorded integer
+            # is representable as a float inside the new range.
+            return
         raise ValueError("Cannot set different distribution kind to the same parameter name.")
 
     if isinstance(dist_old, (FloatDistribution, IntDistribution)):
@@ -648,14 +665,39 @@ def check_distribution_compatibility(
         if dist_old.log != dist_new.log:
             raise ValueError("Cannot set different log configuration to the same parameter name.")
 
-    if not isinstance(dist_old, CategoricalDistribution):
-        return
-    if not isinstance(dist_new, CategoricalDistribution):
-        return
-    if dist_old != dist_new:
-        raise ValueError(
-            CategoricalDistribution.__name__ + " does not support dynamic value space."
-        )
+    if isinstance(dist_old, CategoricalDistribution):
+        assert isinstance(dist_new, CategoricalDistribution)
+        if dist_old != dist_new and not _is_order_preserving_choice_change(
+            dist_old.choices, dist_new.choices
+        ):
+            # Reordering choices would change the internal index representation
+            # of every shared choice, so only order-preserving additions and
+            # removals are allowed as an evolving value space.
+            raise ValueError(
+                CategoricalDistribution.__name__
+                + " does not support reordering of choices; only order-preserving "
+                "additions and removals are allowed."
+            )
+
+
+def _is_order_preserving_choice_change(
+    old_choices: tuple[CategoricalChoiceType, ...],
+    new_choices: tuple[CategoricalChoiceType, ...],
+) -> bool:
+    """Whether one choice sequence is an order-preserving subsequence of the other.
+
+    Appending choices or dropping some while keeping the relative order of every
+    shared choice preserves the meaning of the stored internal indices.
+    """
+
+    def _is_subsequence(
+        sub: tuple[CategoricalChoiceType, ...],
+        full: tuple[CategoricalChoiceType, ...],
+    ) -> bool:
+        it = iter(full)
+        return all(choice in it for choice in sub)
+
+    return _is_subsequence(old_choices, new_choices) or _is_subsequence(new_choices, old_choices)
 
 
 def _adjust_discrete_uniform_high(low: float, high: float, step: float) -> float:

@@ -136,6 +136,29 @@ def test_check_distribution_compatibility() -> None:
         ),
     )
 
+    # Widening IntDistribution to FloatDistribution is lossless when the log
+    # configuration stays identical, so it must be accepted for evolving spaces.
+    distributions.check_distribution_compatibility(
+        distributions.IntDistribution(low=1, high=9, log=False),
+        distributions.FloatDistribution(low=1.0, high=9.0, log=False),
+    )
+    # ... but float -> int cannot be lossless and is still rejected.
+    pytest.raises(
+        ValueError,
+        lambda: distributions.check_distribution_compatibility(
+            distributions.FloatDistribution(low=1.0, high=9.0, log=False),
+            distributions.IntDistribution(low=1, high=9, log=False),
+        ),
+    )
+    # ... and int -> float with a mismatched log flag is also rejected.
+    pytest.raises(
+        ValueError,
+        lambda: distributions.check_distribution_compatibility(
+            distributions.IntDistribution(low=1, high=9, log=False),
+            distributions.FloatDistribution(low=1.0, high=9.0, log=True),
+        ),
+    )
+
     # Test compatibility between IntDistributions.
     distributions.check_distribution_compatibility(
         EXAMPLE_DISTRIBUTIONS["id"], EXAMPLE_DISTRIBUTIONS["i"]
