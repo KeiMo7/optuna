@@ -1,0 +1,31 @@
+{
+ "workers": 8,
+ "n_trials_target": 16,
+ "duration_seconds": 11.7,
+ "trials_total": 29,
+ "trials_complete": 28,
+ "suspends": 12,
+ "crashes": 1,
+ "crash_trial_id": 2,
+ "crash_trial_complete": true,
+ "reap_latency_seconds": 1.41,
+ "max_active_leases": 6,
+ "lease_overlaps": [],
+ "duplicate_step_executions": 0,
+ "inflight_step_reexecutions": 0,
+ "value_mismatches": [],
+ "history_mismatches": [],
+ "takeover_race": [
+  [
+   "reaper-0",
+   "TakeoverRejectedError"
+  ],
+  [
+   "reaper-1",
+   "ok"
+  ]
+ ],
+ "takeover_exactly_one_winner": true,
+ "stale_executor_fenced": true,
+ "ok": true
+}
