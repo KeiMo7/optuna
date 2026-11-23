@@ -100,6 +100,7 @@ The :mod:`~optuna.samplers` module defines a base class for parameter sampling a
     QMCSampler
     BruteForceSampler
     PartialFixedSampler
+    ConditionalSampler
 
 .. note::
     The following :mod:`optuna.samplers.nsgaii` module defines crossover and mutation operations

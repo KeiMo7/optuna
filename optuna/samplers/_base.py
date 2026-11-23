@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from optuna.distributions import BaseDistribution
+    from optuna.search_space import ConditionalSearchSpace
     from optuna.study import Study
     from optuna.trial import FrozenTrial
 
@@ -65,6 +66,15 @@ class BaseSampler(abc.ABC):
 
     def __str__(self) -> str:
         return self.__class__.__name__
+
+    def _conditional_search_space(self) -> "ConditionalSearchSpace | None":
+        """Return the declaration that drives this sampler, if any.
+
+        Samplers that enforce a declarative conditional search space override this method.
+        The default implementation returns :obj:`None`, preserving the existing behavior.
+        """
+
+        return None
 
     @abc.abstractmethod
     def infer_relative_search_space(

@@ -28,6 +28,7 @@ from optuna._imports import _LazyImport
 from optuna._warnings import optuna_warn
 from optuna.distributions import _convert_old_distribution_to_new_distribution
 from optuna.distributions import BaseDistribution
+from optuna.search_space import ConditionalSearchSpace
 from optuna.storages._heartbeat import is_heartbeat_enabled
 from optuna.study._constrained_optimization import _get_feasible_trials
 from optuna.study._constrained_optimization import _is_constrained_optimization
@@ -54,6 +55,8 @@ ObjectiveFuncType = Callable[["Trial"], Union[float, Sequence[float]]]
 
 
 _SYSTEM_ATTR_METRIC_NAMES = "study:metric_names"
+_SYSTEM_ATTR_CONDITIONAL_SEARCH_SPACE = "study:conditional_search_space"
+_SYSTEM_ATTR_CONDITIONAL_REJECTIONS = "study:conditional_rejections"
 
 
 _logger = logging.get_logger(__name__)
@@ -82,6 +85,7 @@ class Study:
         storage: str | storages.BaseStorage,
         sampler: "samplers.BaseSampler" | None = None,
         pruner: pruners.BasePruner | None = None,
+        conditional_search_space: "ConditionalSearchSpace | None" = None,
     ) -> None:
         self.study_name = study_name
         storage = storages.get_storage(storage)
@@ -90,7 +94,50 @@ class Study:
         self._storage = storage
         self._directions = storage.get_study_directions(study_id)
 
-        self.sampler = sampler or samplers.TPESampler()
+        sampler = sampler or samplers.TPESampler()
+        declared = getattr(sampler, "_conditional_search_space", lambda: None)()
+        if conditional_search_space is None:
+            conditional_search_space = declared
+        elif declared is not None and declared.version != conditional_search_space.version:
+            raise exceptions.ConditionalSearchSpaceVersionError(
+                expected=conditional_search_space.version,
+                actual=declared.version,
+                diff=conditional_search_space.diff(declared),
+            )
+
+        stored_attr = storage.get_study_system_attrs(study_id).get(
+            _SYSTEM_ATTR_CONDITIONAL_SEARCH_SPACE
+        )
+        if stored_attr is not None:
+            stored_space = ConditionalSearchSpace.from_dict(stored_attr)
+            if conditional_search_space is None:
+                conditional_search_space = stored_space
+            elif stored_space.version != conditional_search_space.version:
+                raise exceptions.ConditionalSearchSpaceVersionError(
+                    expected=stored_space.version,
+                    actual=conditional_search_space.version,
+                    diff=conditional_search_space.diff(stored_space),
+                )
+        elif conditional_search_space is not None:
+            # The declaration is validated before it is persisted; a malformed declaration
+            # never reaches the storage.
+            conditional_search_space.validate()
+            storage.set_study_system_attr(
+                study_id,
+                _SYSTEM_ATTR_CONDITIONAL_SEARCH_SPACE,
+                conditional_search_space.to_dict(),
+            )
+        self._conditional_search_space = conditional_search_space
+        if conditional_search_space is not None and declared is None:
+            # A declaration attached to the study must govern suggestions even when the user
+            # supplied a plain sampler. Wrap it so the declaration remains the source of truth.
+            sampler = samplers.ConditionalSampler(
+                conditional_search_space,
+                strategy="delegate",
+                fallback_sampler=sampler,
+            )
+
+        self.sampler = sampler
         self.pruner = pruner or pruners.MedianPruner()
 
         self._thread_local = _ThreadLocalStudyAttribute()
@@ -104,6 +151,38 @@ class Study:
     def __setstate__(self, state: dict[Any, Any]) -> None:
         self.__dict__.update(state)
         self._thread_local = _ThreadLocalStudyAttribute()
+
+    @property
+    def conditional_search_space(self) -> "ConditionalSearchSpace | None":
+        """Return the declarative conditional search space attached to this study, if any."""
+
+        return self._conditional_search_space
+
+    def _record_conditional_rejection(self, condition: str) -> None:
+        """Count a suggestion rejected by the declaration.
+
+        Rejected assignments are tracked separately from failed trials so they stay
+        distinguishable in the study history.
+        """
+
+        current = dict(
+            self._storage.get_study_system_attrs(self._study_id).get(
+                _SYSTEM_ATTR_CONDITIONAL_REJECTIONS, {}
+            )
+        )
+        current[condition] = current.get(condition, 0) + 1
+        self._storage.set_study_system_attr(
+            self._study_id, _SYSTEM_ATTR_CONDITIONAL_REJECTIONS, current
+        )
+
+    @property
+    def conditional_rejections(self) -> dict[str, int]:
+        """Return assignment rejections keyed by the violated condition."""
+
+        stored = self._storage.get_study_system_attrs(self._study_id).get(
+            _SYSTEM_ATTR_CONDITIONAL_REJECTIONS, {}
+        )
+        return dict(stored)
 
     @property
     def best_params(self) -> dict[str, Any]:
@@ -893,6 +972,12 @@ class Study:
         if not isinstance(params, dict):
             raise TypeError("params must be a dictionary.")
 
+        if self._conditional_search_space is not None:
+            # Validate before creating the trial so a rejected assignment never consumes a trial
+            # number or budget. Only the supplied parameters are checked; the objective supplies
+            # the rest during the run.
+            self._conditional_search_space.validate_values(params, allow_fixed_only=True)
+
         if skip_if_exists and self._should_skip_enqueue(params):
             _logger.info(f"Trial with params {params} already exists. Skipping enqueue.")
             return
@@ -974,6 +1059,11 @@ class Study:
                 f"number of objectives {len(self.directions)} in the study (determined by "
                 "Study.directions)."
             )
+
+        if self._conditional_search_space is not None and len(trial.params) > 0:
+            # External imports are validated before the trial is created. A rejected trial does
+            # not consume a trial number.
+            self._conditional_search_space.validate_values(trial.params)
 
         self._storage.create_new_trial(self._study_id, template_trial=trial)
 
@@ -1169,6 +1259,7 @@ def create_study(
     direction: Literal["minimize", "maximize"] | StudyDirection | None = None,
     load_if_exists: bool = False,
     directions: Sequence[Literal["minimize", "maximize"] | StudyDirection] | None = None,
+    conditional_search_space: "ConditionalSearchSpace | None" = None,
 ) -> Study:
     """Create a new :class:`~optuna.study.Study`.
 
@@ -1233,6 +1324,13 @@ def create_study(
         directions:
             A sequence of directions during multi-objective optimization.
             ``direction`` and ``directions`` must not be specified at the same time.
+        conditional_search_space:
+            An optional :class:`~optuna.search_space.ConditionalSearchSpace` declaration.
+            When given, the declaration is stored with the study, used to validate enqueued
+            trials and made available to samplers that support declarations. If the study
+            already exists, its stored declaration is compared with this one and a
+            :class:`~optuna.exceptions.ConditionalSearchSpaceVersionError` is raised on a
+            mismatch.
 
     Returns:
         A :class:`~optuna.study.Study` object.
@@ -1296,7 +1394,13 @@ def create_study(
             )
 
     study_name = storage.get_study_name_from_id(study_id)
-    study = Study(study_name=study_name, storage=storage, sampler=sampler, pruner=pruner)
+    study = Study(
+        study_name=study_name,
+        storage=storage,
+        sampler=sampler,
+        pruner=pruner,
+        conditional_search_space=conditional_search_space,
+    )
 
     return study
 
@@ -1307,6 +1411,7 @@ def load_study(
     storage: str | storages.BaseStorage,
     sampler: "samplers.BaseSampler" | None = None,
     pruner: pruners.BasePruner | None = None,
+    conditional_search_space: "ConditionalSearchSpace | None" = None,
 ) -> Study:
     """Load the existing :class:`~optuna.study.Study` that has the specified name.
 
@@ -1355,6 +1460,10 @@ def load_study(
             A pruner object that decides early stopping of unpromising trials.
             If :obj:`None` is specified, :class:`~optuna.pruners.MedianPruner` is used
             as the default. See also :class:`~optuna.pruners`.
+        conditional_search_space:
+            An optional declaration. When given, it is compared with the declaration stored
+            with the study; a mismatch raises
+            :class:`~optuna.exceptions.ConditionalSearchSpaceVersionError` with the difference.
 
     Returns:
         A :class:`~optuna.study.Study` object.
@@ -1376,7 +1485,13 @@ def load_study(
             "study found in the storage."
         )
 
-    study = Study(study_name=study_name, storage=storage, sampler=sampler, pruner=pruner)
+    study = Study(
+        study_name=study_name,
+        storage=storage,
+        sampler=sampler,
+        pruner=pruner,
+        conditional_search_space=conditional_search_space,
+    )
     return study
 
 
@@ -1514,6 +1629,7 @@ def copy_study(
         storage=to_storage,
         directions=from_study.directions,
         load_if_exists=False,
+        conditional_search_space=from_study.conditional_search_space,
     )
 
     for key, value in from_study._storage.get_study_system_attrs(from_study._study_id).items():

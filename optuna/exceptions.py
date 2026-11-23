@@ -90,6 +90,78 @@ class UpdateFinishedTrialError(OptunaError, RuntimeError):
     pass
 
 
+class InvalidConditionalSearchSpaceError(OptunaError, ValueError):
+    """Exception for a malformed conditional search space declaration.
+
+    This error is raised while a declaration is being created or validated, e.g. when a
+    condition references an unknown parameter, when the dependency graph contains a cycle, or
+    when two mutually exclusive branches overlap.
+    """
+
+    pass
+
+
+class ConditionalConstraintViolation(OptunaError, ValueError):
+    """Exception for parameter values rejected by a conditional search space declaration.
+
+    The exception references the first condition that the values do not satisfy. It contains
+    parameter names and the declared condition expression only.
+    """
+
+    def __init__(self, condition: str, param_name: str | None = None, reason: str = "") -> None:
+        self.condition = condition
+        self.param_name = param_name
+        message = f"The declared condition `{condition}` is not satisfied"
+        if param_name is not None:
+            message += f" (parameter `{param_name}`)"
+        if reason:
+            message += f": {reason}"
+        super().__init__(message + ".")
+
+
+class UnsatisfiableConstraintError(InvalidConditionalSearchSpaceError):
+    """Exception raised when a declared constraint has no feasible values.
+
+    The message names the constraint and the parameters involved so the offending rule can be
+    identified without a generic "no feasible solution" report.
+    """
+
+    def __init__(self, constraint: str, reason: str = "") -> None:
+        self.constraint = constraint
+        message = f"The declared constraint `{constraint}` has no feasible assignment"
+        if reason:
+            message += f": {reason}"
+        super().__init__(message + ".")
+
+
+class EnumerationLimitExceeded(InvalidConditionalSearchSpaceError):
+    """Exception raised when a grid enumeration exceeds ``max_combinations``."""
+
+    def __init__(self, limit: int, reached: int) -> None:
+        self.limit = limit
+        self.reached = reached
+        super().__init__(
+            f"Enumerating the conditional search space exceeded the limit of {limit} "
+            f"combinations (stopped after {reached}). Raise `max_combinations` to enumerate more."
+        )
+
+
+class ConditionalSearchSpaceVersionError(OptunaError, ValueError):
+    """Exception raised when a study's declaration version does not match the current one."""
+
+    def __init__(self, expected: str, actual: str, diff: str = "") -> None:
+        self.expected = expected
+        self.actual = actual
+        self.diff = diff
+        message = (
+            "The conditional search space declaration of this study does not match the current "
+            f"one (stored version {expected}, current version {actual})."
+        )
+        if diff:
+            message += f"\nDifference:\n{diff}"
+        super().__init__(message)
+
+
 class ExperimentalWarning(Warning):
     """Experimental Warning class.
 
